@@ -1,0 +1,12 @@
+/dist/
+/server/dist/
+/web/build/
+/web/node_modules/
+server/config/config.yaml
+
+.vscode/
+.idea/
+*.ipr
+*.iws
+*.iml
+out/
