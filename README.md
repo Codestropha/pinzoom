@@ -4,3 +4,4 @@
 
 ### Used stack:
 1. Golang
+2. JS, HTML, BulmaCSS
