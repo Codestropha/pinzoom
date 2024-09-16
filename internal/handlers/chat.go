@@ -1,38 +1,48 @@
 package handlers
 
 import (
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/websocket/v2"
+	"fmt"
+	"html/template"
 	"pinzoom/pkg/chat"
+	"pinzoom/pkg/hub"
 	"pinzoom/pkg/webrtc"
 )
 
-func RoomChat(c *fiber.Ctx) error {
-	return c.Render("chat", fiber.Map{}, "layouts/main")
+func RoomChat(ctx *hub.Ctx) error {
+	tmpl, err := template.ParseFiles("views/chat.html", "views/layouts/main.html")
+	if err != nil {
+		return fmt.Errorf("error while parsing template, err=%v", err)
+	}
+	if err = tmpl.ExecuteTemplate(ctx.Response, "main", nil); err != nil {
+		return fmt.Errorf("error while executing template, err=%v", err)
+	}
+	return nil
 }
 
-func RoomChatWebsocket(c *websocket.Conn) {
-	uuid := c.Params("uuid")
-	if uuid == "" {
-		return
+func RoomChatWebsocket(ctx *hub.Ctx) error {
+	uuidFromParam := ctx.Param("uuid")
+	if uuidFromParam == "" {
+		return fmt.Errorf("there no uuid param")
 	}
 
 	webrtc.RoomsLock.Lock()
-	room := webrtc.Rooms[uuid]
+	room := webrtc.Rooms[uuidFromParam]
 	webrtc.RoomsLock.Unlock()
 	if room == nil {
-		return
+		return nil
 	}
 	if room.Hub == nil {
-		return
+		return nil
 	}
-	chat.PeerChatConn(c.Conn, room.Hub)
+
+	chat.PeerChatConn(ctx, room.Hub)
+	return nil
 }
 
-func StreamChatWebsocket(c *websocket.Conn) {
-	suuid := c.Params("suuid")
+func StreamChatWebsocket(ctx *hub.Ctx) error {
+	suuid := ctx.Param("suuid")
 	if suuid == "" {
-		return
+		return fmt.Errorf("there no suuid param")
 	}
 
 	webrtc.RoomsLock.Lock()
@@ -43,8 +53,9 @@ func StreamChatWebsocket(c *websocket.Conn) {
 			stream.Hub = hub
 			go hub.Run()
 		}
-		chat.PeerChatConn(c.Conn, stream.Hub)
-		return
+		chat.PeerChatConn(ctx, stream.Hub)
+		return nil
 	}
 	webrtc.RoomsLock.Unlock()
+	return nil
 }

@@ -2,10 +2,10 @@ package chat
 
 import (
 	"bytes"
-	"log"
+	"github.com/sirupsen/logrus"
+	"pinzoom/pkg/hub"
+	ws "pinzoom/pkg/websocket"
 	"time"
-
-	"github.com/fasthttp/websocket"
 )
 
 const (
@@ -20,14 +20,9 @@ var (
 	space   = []byte{' '}
 )
 
-var upgrader = websocket.FastHTTPUpgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
-
 type Client struct {
 	Hub  *Hub
-	Conn *websocket.Conn
+	Conn *ws.WebSocket
 	Send chan []byte
 }
 
@@ -42,8 +37,8 @@ func (c *Client) readPump() {
 	for {
 		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+			if ws.IsUnexpectedCloseError(err, ws.CloseGoingAway, ws.CloseAbnormalClosure) {
+				logrus.Printf("error while reading pump, err=%v", err)
 			}
 			break
 		}
@@ -63,10 +58,10 @@ func (c *Client) writePump() {
 		case message, ok := <-c.Send:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
+				c.Conn.WriteMessage(ws.CloseMessage, []byte{})
 				return
 			}
-
-			w, err := c.Conn.NextWriter(websocket.TextMessage)
+			w, err := c.Conn.NextWriter(ws.TextMessage)
 			if err != nil {
 				return
 			}
@@ -83,15 +78,19 @@ func (c *Client) writePump() {
 			}
 		case <-ticker.C:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if err := c.Conn.WriteMessage(ws.PingMessage, nil); err != nil {
 				return
 			}
 		}
 	}
 }
 
-func PeerChatConn(c *websocket.Conn, hub *Hub) {
-	client := &Client{Hub: hub, Conn: c, Send: make(chan []byte, 256)}
+func PeerChatConn(c *hub.Ctx, hub *Hub) {
+	client := &Client{
+		Hub:  hub,
+		Conn: c.WebSocket,
+		Send: make(chan []byte, 256),
+	}
 	client.Hub.register <- client
 
 	go client.writePump()

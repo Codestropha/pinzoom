@@ -2,23 +2,22 @@ package webrtc
 
 import (
 	"encoding/json"
-	"log"
+	"github.com/sirupsen/logrus"
 	"os"
+	"pinzoom/pkg/hub"
 	"sync"
 
-	"github.com/gofiber/websocket/v2"
 	"github.com/pion/webrtc/v3"
 )
 
-func RoomConn(c *websocket.Conn, p *Peers) {
+func RoomConn(ctx *hub.Ctx, p *Peers) error {
 	var config webrtc.Configuration
 	if os.Getenv("ENVIRONMENT") == "PRODUCTION" {
 		config = turnConfig
 	}
 	peerConnection, err := webrtc.NewPeerConnection(config)
 	if err != nil {
-		log.Print(err)
-		return
+		return err
 	}
 	defer peerConnection.Close()
 
@@ -26,15 +25,14 @@ func RoomConn(c *websocket.Conn, p *Peers) {
 		if _, err := peerConnection.AddTransceiverFromKind(typ, webrtc.RTPTransceiverInit{
 			Direction: webrtc.RTPTransceiverDirectionRecvonly,
 		}); err != nil {
-			log.Print(err)
-			return
+			return err
 		}
 	}
 
 	newPeer := PeerConnectionState{
 		PeerConnection: peerConnection,
 		Websocket: &ThreadSafeWriter{
-			Conn:  c,
+			Conn:  ctx.WebSocket,
 			Mutex: sync.Mutex{},
 		}}
 
@@ -42,8 +40,6 @@ func RoomConn(c *websocket.Conn, p *Peers) {
 	p.ListLock.Lock()
 	p.Connections = append(p.Connections, newPeer)
 	p.ListLock.Unlock()
-
-	log.Println(p.Connections)
 
 	// Trickle ICE. Emit server candidate to client
 	peerConnection.OnICECandidate(func(i *webrtc.ICECandidate) {
@@ -53,7 +49,7 @@ func RoomConn(c *websocket.Conn, p *Peers) {
 
 		candidateString, err := json.Marshal(i.ToJSON())
 		if err != nil {
-			log.Println(err)
+			logrus.Errorf("failed to marshal iceCandidate in room, err=%v", err)
 			return
 		}
 
@@ -61,7 +57,7 @@ func RoomConn(c *websocket.Conn, p *Peers) {
 			Event: "candidate",
 			Data:  string(candidateString),
 		}); writeErr != nil {
-			log.Println(writeErr)
+			logrus.Errorf("failed to write JSON into WS in room, err=%v", writeErr)
 		}
 	})
 
@@ -70,10 +66,12 @@ func RoomConn(c *websocket.Conn, p *Peers) {
 		switch pp {
 		case webrtc.PeerConnectionStateFailed:
 			if err := peerConnection.Close(); err != nil {
-				log.Print(err)
+				logrus.Errorf("failed to close room peerConnection, err=%v", err)
 			}
 		case webrtc.PeerConnectionStateClosed:
 			p.SignalPeerConnections()
+		default:
+			logrus.Error("unhandled default case")
 		}
 	})
 
@@ -101,37 +99,31 @@ func RoomConn(c *websocket.Conn, p *Peers) {
 	p.SignalPeerConnections()
 	message := &websocketMessage{}
 	for {
-		_, raw, err := c.ReadMessage()
+		_, raw, err := ctx.WebSocket.ReadMessage()
 		if err != nil {
-			log.Println(err)
-			return
+			return err
 		} else if err := json.Unmarshal(raw, &message); err != nil {
-			log.Println(err)
-			return
+			return err
 		}
 
 		switch message.Event {
 		case "candidate":
 			candidate := webrtc.ICECandidateInit{}
 			if err := json.Unmarshal([]byte(message.Data), &candidate); err != nil {
-				log.Println(err)
-				return
+				return err
 			}
 
 			if err := peerConnection.AddICECandidate(candidate); err != nil {
-				log.Println(err)
-				return
+				return err
 			}
 		case "answer":
 			answer := webrtc.SessionDescription{}
 			if err := json.Unmarshal([]byte(message.Data), &answer); err != nil {
-				log.Println(err)
-				return
+				return err
 			}
 
 			if err := peerConnection.SetRemoteDescription(answer); err != nil {
-				log.Println(err)
-				return
+				return err
 			}
 		}
 	}

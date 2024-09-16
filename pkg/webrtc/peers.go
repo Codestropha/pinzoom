@@ -2,12 +2,12 @@ package webrtc
 
 import (
 	"encoding/json"
-	"log"
+	"github.com/sirupsen/logrus"
 	"pinzoom/pkg/chat"
+	ws "pinzoom/pkg/websocket"
 	"sync"
 	"time"
 
-	"github.com/gofiber/websocket/v2"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v3"
 )
@@ -54,7 +54,7 @@ type PeerConnectionState struct {
 }
 
 type ThreadSafeWriter struct {
-	Conn  *websocket.Conn
+	Conn  *ws.WebSocket
 	Mutex sync.Mutex
 }
 
@@ -73,7 +73,7 @@ func (p *Peers) AddTrack(t *webrtc.TrackRemote) *webrtc.TrackLocalStaticRTP {
 
 	trackLocal, err := webrtc.NewTrackLocalStaticRTP(t.Codec().RTPCodecCapability, t.ID(), t.StreamID())
 	if err != nil {
-		log.Println(err.Error())
+		logrus.Errorf("failed to create trackLocalStaticRTP, err=%v", err)
 		return nil
 	}
 
@@ -102,7 +102,6 @@ func (p *Peers) SignalPeerConnections() {
 		for i := range p.Connections {
 			if p.Connections[i].PeerConnection.ConnectionState() == webrtc.PeerConnectionStateClosed {
 				p.Connections = append(p.Connections[:i], p.Connections[i+1:]...)
-				log.Println("a", p.Connections)
 				return true
 			}
 

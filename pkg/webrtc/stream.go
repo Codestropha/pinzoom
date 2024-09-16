@@ -2,32 +2,36 @@ package webrtc
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
+	"github.com/sirupsen/logrus"
 	"os"
+	ws "pinzoom/pkg/websocket"
 	"sync"
 
-	"github.com/gofiber/websocket/v2"
 	"github.com/pion/webrtc/v3"
 )
 
-func StreamConn(c *websocket.Conn, p *Peers) {
+func StreamConn(c *ws.WebSocket, p *Peers) error {
 	var config webrtc.Configuration
 	if os.Getenv("ENVIRONMENT") == "PRODUCTION" {
 		config = turnConfig
 	}
 	peerConnection, err := webrtc.NewPeerConnection(config)
 	if err != nil {
-		log.Print(err)
-		return
+		return err
 	}
-	defer peerConnection.Close()
+	defer func(peerConnection *webrtc.PeerConnection) {
+		if err := peerConnection.Close(); err != nil {
+			logrus.Errorf("unexpected error while closing peerConnection, err=%v", err)
+			return
+		}
+	}(peerConnection)
 
 	for _, typ := range []webrtc.RTPCodecType{webrtc.RTPCodecTypeVideo, webrtc.RTPCodecTypeAudio} {
 		if _, err := peerConnection.AddTransceiverFromKind(typ, webrtc.RTPTransceiverInit{
 			Direction: webrtc.RTPTransceiverDirectionRecvonly,
 		}); err != nil {
-			log.Print(err)
-			return
+			return fmt.Errorf("unexpected error while creating a new RtpTransceiver, err=%v", err)
 		}
 	}
 
@@ -42,8 +46,6 @@ func StreamConn(c *websocket.Conn, p *Peers) {
 	p.Connections = append(p.Connections, newPeer)
 	p.ListLock.Unlock()
 
-	log.Println(p.Connections)
-
 	peerConnection.OnICECandidate(func(i *webrtc.ICECandidate) {
 		if i == nil {
 			return
@@ -51,7 +53,7 @@ func StreamConn(c *websocket.Conn, p *Peers) {
 
 		candidateString, err := json.Marshal(i.ToJSON())
 		if err != nil {
-			log.Println(err)
+			logrus.Errorf("failed to marshal iceCandidate on stream, err=%v", err)
 			return
 		}
 
@@ -59,7 +61,7 @@ func StreamConn(c *websocket.Conn, p *Peers) {
 			Event: "candidate",
 			Data:  string(candidateString),
 		}); writeErr != nil {
-			log.Println(writeErr)
+			logrus.Errorf("failed to write JSON into WS on stream, err=%v", writeErr)
 		}
 	})
 
@@ -67,10 +69,12 @@ func StreamConn(c *websocket.Conn, p *Peers) {
 		switch pp {
 		case webrtc.PeerConnectionStateFailed:
 			if err := peerConnection.Close(); err != nil {
-				log.Print(err)
+				logrus.Errorf("failed to close stream peerConnection, err=%v", err)
 			}
 		case webrtc.PeerConnectionStateClosed:
 			p.SignalPeerConnections()
+		default:
+			logrus.Error("unhandled default case")
 		}
 	})
 
@@ -79,35 +83,29 @@ func StreamConn(c *websocket.Conn, p *Peers) {
 	for {
 		_, raw, err := c.ReadMessage()
 		if err != nil {
-			log.Println(err)
-			return
+			return err
 		} else if err := json.Unmarshal(raw, &message); err != nil {
-			log.Println(err)
-			return
+			return err
 		}
 
 		switch message.Event {
 		case "candidate":
 			candidate := webrtc.ICECandidateInit{}
 			if err := json.Unmarshal([]byte(message.Data), &candidate); err != nil {
-				log.Println(err)
-				return
+				return err
 			}
 
 			if err := peerConnection.AddICECandidate(candidate); err != nil {
-				log.Println(err)
-				return
+				return err
 			}
 		case "answer":
 			answer := webrtc.SessionDescription{}
 			if err := json.Unmarshal([]byte(message.Data), &answer); err != nil {
-				log.Println(err)
-				return
+				return err
 			}
 
 			if err := peerConnection.SetRemoteDescription(answer); err != nil {
-				log.Println(err)
-				return
+				return err
 			}
 		}
 	}

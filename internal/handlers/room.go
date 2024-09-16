@@ -2,54 +2,85 @@ package handlers
 
 import (
 	"fmt"
+	"github.com/google/uuid"
+	"github.com/pion/webrtc/v3"
+	"github.com/sirupsen/logrus"
+	"html/template"
+	"net/http"
 	"os"
 	"pinzoom/pkg/chat"
+	"pinzoom/pkg/hub"
 	w "pinzoom/pkg/webrtc"
+	ws "pinzoom/pkg/websocket"
 	"time"
 
 	"crypto/sha256"
-
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/websocket/v2"
-	guuid "github.com/google/uuid"
-	"github.com/pion/webrtc/v3"
 )
 
-func RoomCreate(c *fiber.Ctx) error {
-	return c.Redirect(fmt.Sprintf("/room/%s", guuid.New().String()))
+func RoomCreate(ctx *hub.Ctx) error {
+	roomID := uuid.New().String()
+	ctx.Redirect(fmt.Sprintf("/room/%s", roomID))
+	return nil
 }
 
-func Room(c *fiber.Ctx) error {
-	uuid := c.Params("uuid")
-	if uuid == "" {
-		c.Status(400)
-		return nil
+func Room(ctx *hub.Ctx) error {
+	ctx.Response.Header().Set("Content-Type", "text/html; charset=utf-8")
+	uuidFromParam := ctx.Param("uuid")
+	if uuidFromParam == "" {
+		return fmt.Errorf("there no uuid param")
 	}
+	logrus.Println(uuidFromParam)
 
-	ws := "ws"
+	wsProto := "ws"
 	if os.Getenv("ENVIRONMENT") == "PRODUCTION" {
-		ws = "wss"
+		wsProto = "wss"
 	}
 
-	uuid, suuid, _ := createOrGetRoom(uuid)
-	return c.Render("peer", fiber.Map{
-		"RoomWebsocketAddr":   fmt.Sprintf("%s://%s/room/%s/websocket", ws, c.Hostname(), uuid),
-		"RoomLink":            fmt.Sprintf("%s://%s/room/%s", c.Protocol(), c.Hostname(), uuid),
-		"ChatWebsocketAddr":   fmt.Sprintf("%s://%s/room/%s/chat/websocket", ws, c.Hostname(), uuid),
-		"ViewerWebsocketAddr": fmt.Sprintf("%s://%s/room/%s/viewer/websocket", ws, c.Hostname(), uuid),
-		"StreamLink":          fmt.Sprintf("%s://%s/stream/%s", c.Protocol(), c.Hostname(), suuid),
-		"Type":                "room",
-	}, "layouts/main")
+	uuidFromParam, suuid, _ := createOrGetRoom(uuidFromParam)
+	data := struct {
+		RoomWebsocketAddr   string
+		RoomLink            string
+		ChatWebsocketAddr   string
+		ViewerWebsocketAddr string
+		StreamLink          string
+		Type                string
+	}{
+		RoomWebsocketAddr:   fmt.Sprintf("%s://%s/room/%s/websocket", wsProto, ctx.Host(), uuidFromParam),
+		RoomLink:            fmt.Sprintf("%s://%s/room/%s", getProtocol(ctx.Request), ctx.Host(), uuidFromParam),
+		ChatWebsocketAddr:   fmt.Sprintf("%s://%s/room/%s/chat/websocket", wsProto, ctx.Host(), uuidFromParam),
+		ViewerWebsocketAddr: fmt.Sprintf("%s://%s/room/%s/viewer/websocket", wsProto, ctx.Host(), uuidFromParam),
+		StreamLink:          fmt.Sprintf("%s://%s/stream/%s", getProtocol(ctx.Request), ctx.Host(), suuid),
+		Type:                "room",
+	}
+
+	tmpl, err := template.ParseFiles(
+		"views/peer.html",
+		"views/layouts/main.html",
+		"./views/partials/head.html",
+		"./views/partials/header.html",
+		"./views/partials/chat.html",
+	)
+	if err != nil {
+		return fmt.Errorf("error while parsing template, err=%v", err)
+	}
+
+	if err = tmpl.ExecuteTemplate(ctx.Response, "main", data); err != nil {
+		return fmt.Errorf("error while executing template, err=%v", err)
+	}
+	return nil
 }
 
-func RoomWebsocket(c *websocket.Conn) {
-	uuid := c.Params("uuid")
-	if uuid == "" {
-		return
+func RoomWebsocket(ctx *hub.Ctx) error {
+	if ctx.WebSocket == nil {
+		return fmt.Errorf("ws connection not found")
+	}
+	uuidFromParam := ctx.Param("uuid")
+	if uuidFromParam == "" {
+		return fmt.Errorf("there no uuid param")
 	}
 
-	_, _, room := createOrGetRoom(uuid)
-	w.RoomConn(c, room.Peers)
+	_, _, room := createOrGetRoom(uuidFromParam)
+	return w.RoomConn(ctx, room.Peers)
 }
 
 func createOrGetRoom(uuid string) (string, string, *w.Room) {
@@ -82,22 +113,23 @@ func createOrGetRoom(uuid string) (string, string, *w.Room) {
 	return uuid, suuid, room
 }
 
-func RoomViewerWebsocket(c *websocket.Conn) {
-	uuid := c.Params("uuid")
-	if uuid == "" {
-		return
+func RoomViewerWebsocket(ctx *hub.Ctx) error {
+	uuidFromParam := ctx.Param("uuid")
+	if uuidFromParam == "" {
+		return fmt.Errorf("there no uuid param")
 	}
 
 	w.RoomsLock.Lock()
-	if peer, ok := w.Rooms[uuid]; ok {
+	if peer, ok := w.Rooms[uuidFromParam]; ok {
 		w.RoomsLock.Unlock()
-		roomViewerConn(c, peer.Peers)
-		return
+		roomViewerConn(ctx.WebSocket, peer.Peers)
+		return nil
 	}
 	w.RoomsLock.Unlock()
+	return nil
 }
 
-func roomViewerConn(c *websocket.Conn, p *w.Peers) {
+func roomViewerConn(c *ws.WebSocket, p *w.Peers) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	defer c.Close()
@@ -105,7 +137,7 @@ func roomViewerConn(c *websocket.Conn, p *w.Peers) {
 	for {
 		select {
 		case <-ticker.C:
-			w, err := c.Conn.NextWriter(websocket.TextMessage)
+			w, err := c.NextWriter(ws.TextMessage)
 			if err != nil {
 				return
 			}
@@ -114,7 +146,9 @@ func roomViewerConn(c *websocket.Conn, p *w.Peers) {
 	}
 }
 
-type websocketMessage struct {
-	Event string `json:"event"`
-	Data  string `json:"data"`
+func getProtocol(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }

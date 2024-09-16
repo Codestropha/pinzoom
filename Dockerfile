@@ -1,4 +1,4 @@
-FROM golang:1.19-alpine
+FROM bitnami/golang:1.22
 WORKDIR /src
 
 COPY go.mod go.sum ./

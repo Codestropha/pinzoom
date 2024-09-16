@@ -1,14 +1,12 @@
 package server
 
 import (
+	"context"
 	"flag"
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/logger"
-	"github.com/gofiber/template/html"
-	"github.com/gofiber/websocket/v2"
+	"github.com/sirupsen/logrus"
 	"os"
 	"pinzoom/internal/handlers"
+	"pinzoom/pkg/router"
 	"pinzoom/pkg/webrtc"
 	"time"
 )
@@ -19,42 +17,47 @@ var (
 	key  = flag.String("key", "", "")
 )
 
-func Run() error {
+func Run(ctx context.Context) error {
 	flag.Parse()
 
 	if *addr == ":" {
 		*addr = ":8080"
 	}
 
-	engine := html.New("./views", ".html")
-	app := fiber.New(fiber.Config{Views: engine})
-	app.Use(logger.New())
-	app.Use(cors.New())
+	app := router.NewRouter()
+	app.Use(router.CORSMiddleware)
+	app.Use(router.ErrorMiddleware)
 
 	app.Get("/", handlers.Welcome)
 	app.Get("/room/create", handlers.RoomCreate)
 	app.Get("/room/:uuid", handlers.Room)
-	app.Get("/room/:uuid/websocket", websocket.New(handlers.RoomWebsocket, websocket.Config{
-		HandshakeTimeout: 10 * time.Second,
-	}))
+	app.Get("/room/:uuid/websocket", handlers.RoomWebsocket)
 	app.Get("/room/:uuid/chat", handlers.RoomChat)
-	app.Get("/room/:uuid/chat/websocket", websocket.New(handlers.RoomChatWebsocket))
-	app.Get("/room/:uuid/viewer/websocket", websocket.New(handlers.RoomViewerWebsocket))
+	app.Get("/room/:uuid/chat/websocket", handlers.RoomChatWebsocket)
+	app.Get("/room/:uuid/viewer/websocket", handlers.RoomViewerWebsocket)
 	app.Get("/stream/:suuid", handlers.Stream)
-	app.Get("/stream/:suuid/websocket", websocket.New(handlers.StreamWebsocket, websocket.Config{
-		HandshakeTimeout: 10 * time.Second,
-	}))
-	app.Get("/stream/:suuid/chat/websocket", websocket.New(handlers.StreamChatWebsocket))
-	app.Get("/stream/:suuid/viewer/websocket", websocket.New(handlers.StreamViewerWebsocket))
-	app.Static("/", "./assets")
+	app.Get("/stream/:suuid/websocket", handlers.StreamWebsocket)
+	app.Get("/stream/:suuid/chat/websocket", handlers.StreamChatWebsocket)
+	app.Get("/stream/:suuid/viewer/websocket", handlers.StreamViewerWebsocket)
+	app.Static("./assets")
 
 	webrtc.Rooms = make(map[string]*webrtc.Room)
 	webrtc.Streams = make(map[string]*webrtc.Room)
 	go dispatchKeyFrames()
-	if *cert != "" {
-		return app.ListenTLS(*addr, *cert, *key)
-	}
-	return app.Listen(*addr)
+
+	go func() {
+		if *cert != "" {
+			if err := app.ListenAndServeTLS(*addr, *cert, *key); err != nil {
+				logrus.Error(err)
+			}
+		} else if err := app.ListenAndServe(*addr); err != nil {
+			logrus.Error(err)
+		}
+	}()
+
+	<-ctx.Done()
+
+	return nil
 }
 
 func dispatchKeyFrames() {

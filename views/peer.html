@@ -1,4 +1,6 @@
-{{ template "partials/chat" . }}
+{{ define "content" }}
+
+{{ template "chat" . }}
 
 <div class="viewer">
 	<p class="icon-users" id="viewer-count"></p>
@@ -47,3 +49,4 @@
 <script src="/javascript/chat.js"></script>
 <script src="/javascript/viewer.js"></script>
 <script src="//cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+{{ end }}

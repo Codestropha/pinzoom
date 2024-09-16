@@ -1,4 +1,6 @@
-{{ template "partials/head" . }}
-{{ template "partials/header" . }}
+{{ define "main" }}
+  {{ template "head" . }}
+  {{ template "header" . }}
 
-{{ embed }}
+  {{ block "content" . }}{{ end }}
+{{ end }}
