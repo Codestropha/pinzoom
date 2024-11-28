@@ -2,10 +2,10 @@ package chat
 
 import (
 	"bytes"
-	"github.com/sirupsen/logrus"
-	"pinzoom/pkg/hub"
-	ws "pinzoom/pkg/websocket"
+	"log"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -22,7 +22,7 @@ var (
 
 type Client struct {
 	Hub  *Hub
-	Conn *ws.WebSocket
+	Conn *websocket.Conn
 	Send chan []byte
 }
 
@@ -37,8 +37,8 @@ func (c *Client) readPump() {
 	for {
 		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
-			if ws.IsUnexpectedCloseError(err, ws.CloseGoingAway, ws.CloseAbnormalClosure) {
-				logrus.Printf("error while reading pump, err=%v", err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("error: %v", err)
 			}
 			break
 		}
@@ -46,7 +46,6 @@ func (c *Client) readPump() {
 		c.Hub.broadcast <- message
 	}
 }
-
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -58,41 +57,32 @@ func (c *Client) writePump() {
 		case message, ok := <-c.Send:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				c.Conn.WriteMessage(ws.CloseMessage, []byte{})
 				return
 			}
-			w, err := c.Conn.NextWriter(ws.TextMessage)
+			w, err := c.Conn.NextWriter(websocket.TextMessage)
 			if err != nil {
 				return
 			}
 			w.Write(message)
-
 			n := len(c.Send)
 			for i := 0; i < n; i++ {
 				w.Write(newline)
 				w.Write(<-c.Send)
 			}
-
 			if err := w.Close(); err != nil {
 				return
 			}
 		case <-ticker.C:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := c.Conn.WriteMessage(ws.PingMessage, nil); err != nil {
+			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
 	}
 }
-
-func PeerChatConn(c *hub.Ctx, hub *Hub) {
-	client := &Client{
-		Hub:  hub,
-		Conn: c.WebSocket,
-		Send: make(chan []byte, 256),
-	}
+func PeerChatConn(c *websocket.Conn, hub *Hub) {
+	client := &Client{Hub: hub, Conn: c, Send: make(chan []byte, 256)}
 	client.Hub.register <- client
-
 	go client.writePump()
 	client.readPump()
 }

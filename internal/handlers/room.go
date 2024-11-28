@@ -1,20 +1,20 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/pion/webrtc/v3"
-	"github.com/sirupsen/logrus"
 	"html/template"
 	"net/http"
 	"os"
 	"pinzoom/pkg/chat"
 	"pinzoom/pkg/hub"
 	w "pinzoom/pkg/webrtc"
-	ws "pinzoom/pkg/websocket"
 	"time"
 
-	"crypto/sha256"
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v3"
+	"github.com/sirupsen/logrus"
 )
 
 func RoomCreate(ctx *hub.Ctx) error {
@@ -27,16 +27,21 @@ func Room(ctx *hub.Ctx) error {
 	ctx.Response.Header().Set("Content-Type", "text/html; charset=utf-8")
 	uuidFromParam := ctx.Param("uuid")
 	if uuidFromParam == "" {
-		return fmt.Errorf("there no uuid param")
+		logrus.Error("UUID parameter is missing in Room request")
+		return fmt.Errorf("UUID parameter missing")
 	}
-	logrus.Println(uuidFromParam)
+	logrus.Infof("Room requested with UUID: %s", uuidFromParam)
 
 	wsProto := "ws"
 	if os.Getenv("ENVIRONMENT") == "PRODUCTION" {
 		wsProto = "wss"
 	}
 
-	uuidFromParam, suuid, _ := createOrGetRoom(uuidFromParam)
+	uuidFromParam, suuid, room := createOrGetRoom(uuidFromParam)
+	if room == nil {
+		return fmt.Errorf("failed to create or retrieve room with UUID: %s", uuidFromParam)
+	}
+
 	data := struct {
 		RoomWebsocketAddr   string
 		RoomLink            string
@@ -61,25 +66,33 @@ func Room(ctx *hub.Ctx) error {
 		"./views/partials/chat.html",
 	)
 	if err != nil {
-		return fmt.Errorf("error while parsing template, err=%v", err)
+		logrus.Errorf("Template parsing error: %v", err)
+		return fmt.Errorf("error parsing template: %v", err)
 	}
 
 	if err = tmpl.ExecuteTemplate(ctx.Response, "main", data); err != nil {
-		return fmt.Errorf("error while executing template, err=%v", err)
+		logrus.Errorf("Template execution error: %v", err)
+		return fmt.Errorf("error executing template: %v", err)
 	}
 	return nil
 }
 
 func RoomWebsocket(ctx *hub.Ctx) error {
 	if ctx.WebSocket == nil {
-		return fmt.Errorf("ws connection not found")
+		logrus.Error("WebSocket connection not found in RoomWebsocket")
+		return fmt.Errorf("WebSocket connection not found")
 	}
 	uuidFromParam := ctx.Param("uuid")
 	if uuidFromParam == "" {
-		return fmt.Errorf("there no uuid param")
+		logrus.Error("UUID parameter missing in RoomWebsocket")
+		return fmt.Errorf("UUID parameter missing")
 	}
 
 	_, _, room := createOrGetRoom(uuidFromParam)
+	if room == nil {
+		logrus.Errorf("Room with UUID %s not found", uuidFromParam)
+		return fmt.Errorf("room with UUID %s not found", uuidFromParam)
+	}
 	return w.RoomConn(ctx, room.Peers)
 }
 
@@ -99,8 +112,7 @@ func createOrGetRoom(uuid string) (string, string, *w.Room) {
 	}
 
 	hub := chat.NewHub()
-	p := &w.Peers{}
-	p.TrackLocals = make(map[string]*webrtc.TrackLocalStaticRTP)
+	p := &w.Peers{TrackLocals: make(map[string]*webrtc.TrackLocalStaticRTP)}
 	room := &w.Room{
 		Peers: p,
 		Hub:   hub,
@@ -110,17 +122,19 @@ func createOrGetRoom(uuid string) (string, string, *w.Room) {
 	w.Streams[suuid] = room
 
 	go hub.Run()
+	logrus.Infof("Room and stream created with UUID: %s, SUID: %s", uuid, suuid)
 	return uuid, suuid, room
 }
 
 func RoomViewerWebsocket(ctx *hub.Ctx) error {
-	uuidFromParam := ctx.Param("uuid")
-	if uuidFromParam == "" {
-		return fmt.Errorf("there no uuid param")
+	uuid := ctx.Param("uuid")
+	if uuid == "" {
+		logrus.Error("UUID parameter missing in RoomViewerWebsocket")
+		return fmt.Errorf("UUID parameter missing")
 	}
 
 	w.RoomsLock.Lock()
-	if peer, ok := w.Rooms[uuidFromParam]; ok {
+	if peer, ok := w.Rooms[uuid]; ok {
 		w.RoomsLock.Unlock()
 		roomViewerConn(ctx.WebSocket, peer.Peers)
 		return nil
@@ -129,15 +143,14 @@ func RoomViewerWebsocket(ctx *hub.Ctx) error {
 	return nil
 }
 
-func roomViewerConn(c *ws.WebSocket, p *w.Peers) {
+func roomViewerConn(c *websocket.Conn, p *w.Peers) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	defer c.Close()
-
 	for {
 		select {
 		case <-ticker.C:
-			w, err := c.NextWriter(ws.TextMessage)
+			w, err := c.NextWriter(websocket.TextMessage)
 			if err != nil {
 				return
 			}

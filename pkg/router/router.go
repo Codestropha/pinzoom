@@ -2,8 +2,7 @@ package router
 
 import (
 	"bufio"
-	"crypto/tls"
-	"github.com/sirupsen/logrus"
+	"bytes"
 	"net"
 	"net/http"
 	"os"
@@ -11,6 +10,8 @@ import (
 	"pinzoom/pkg/hub"
 	"regexp"
 	"strings"
+
+	"github.com/sirupsen/logrus"
 )
 
 type HandlerFunc func(*hub.Ctx) error
@@ -71,23 +72,21 @@ func (r *Router) Serve(ctx *hub.Ctx) error {
 			}
 			ctx.SetParams(params)
 
-			if strings.EqualFold(ctx.Request.Header.Get("Upgrade"), "websocket") {
-				if err := ctx.Upgrade(); err != nil {
-					return err
-				}
-				return route.handler(ctx)
+			// Apply middleware in registered order
+			for _, mw := range r.middleware {
+				route.handler = mw(route.handler)
 			}
 
-			for i := len(r.middleware) - 1; i >= 0; i-- {
-				route.handler = r.middleware[i](route.handler)
+			if err := route.handler(ctx); err != nil {
+				logrus.Error("Error handling request:", err)
 			}
-
-			return route.handler(ctx)
+			return nil
 		}
 	}
 
+	// Serve static files securely
 	if r.assetsDir != "" {
-		filePath := filepath.Join(r.assetsDir, strings.TrimPrefix(ctx.Request.URL.Path, "/"))
+		filePath := filepath.Join(r.assetsDir, filepath.Clean(strings.TrimPrefix(ctx.Request.URL.Path, "/")))
 		if _, err := os.Stat(filePath); !os.IsNotExist(err) {
 			http.ServeFile(ctx.Response, ctx.Request, filePath)
 			return nil
@@ -114,75 +113,30 @@ func (r *Router) ListenAndServe(addr string) error {
 			continue
 		}
 
-		go func(c net.Conn) {
-			ctx := hub.NewContext(nil, nil, nil, nil, c)
-			defer func() {
-				if ctx.Proto() != hub.ProtoWS {
-					c.Close()
-				}
-			}()
-
-			req, err := http.ReadRequest(bufio.NewReader(c))
-			if err != nil {
-				logrus.Println("Error reading request:", err)
-				return
-			}
-			logrus.Println("Request", req.Method, req.URL, req.Body)
-
-			respWriter := NewResponseWriter(c)
-			ctx.Request = req
-			ctx.Response = respWriter
-
-			if err = r.Serve(ctx); err != nil {
-				logrus.Println("Error serving http:", err)
-				return
-			}
-			logrus.Println("Response", req.Method, req.URL, respWriter.status, req.Body)
-		}(conn)
+		go r.handleConnection(conn)
 	}
 }
 
-func (r *Router) ListenAndServeTLS(addr, certFile, keyFile string) error {
-	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS13,
-	}
-
-	listener, err := tls.Listen("tcp", addr, tlsConfig)
+func (r *Router) handleConnection(c net.Conn) {
+	defer c.Close()
+	ctx := hub.NewContext(nil, nil, nil, nil, c)
+	buf := make([]byte, 1024)
+	n, err := c.Read(buf)
 	if err != nil {
-		logrus.Error("Error starting TLS listener:", err)
+		logrus.Println("Error reading fd:", err)
+		return
 	}
-	defer listener.Close()
+	reader := bytes.NewBuffer(buf[:n])
+	req, err := http.ReadRequest(bufio.NewReader(reader))
+	if err != nil {
+		logrus.Println("Error reading request:", err)
+		return
+	}
+	respWriter := NewResponseWriter(c)
+	ctx.Request = req
+	ctx.Response = respWriter
 
-	logrus.Printf("Server is running on %s with TLS\n", addr)
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			logrus.Println("Error accepting connection:", err)
-			continue
-		}
-
-		go func(c net.Conn) {
-			ctx := hub.NewContext(nil, nil, nil, nil, c)
-			defer func() {
-				if ctx.Proto() != hub.ProtoWS {
-					c.Close()
-				}
-			}()
-			req, err := http.ReadRequest(bufio.NewReader(c))
-			if err != nil {
-				logrus.Println("Error reading request:", err)
-				return
-			}
-
-			respWriter := NewResponseWriter(c)
-			ctx.Request = req
-			ctx.Response = respWriter
-
-			if err = r.Serve(ctx); err != nil {
-				logrus.Println("Error serving http:", err)
-				return
-			}
-		}(conn)
+	if err := r.Serve(ctx); err != nil {
+		logrus.Println("Error serving request:", err)
 	}
 }

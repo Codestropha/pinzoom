@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,10 +19,10 @@ func (w *Response) Header() http.Header {
 }
 
 func (w *Response) WriteHeader(statusCode int) {
-	if w.headersSent {
-		return
+	if !w.headersSent {
+		w.status = statusCode
+		w.Write(nil) // Trigger sending headers with status
 	}
-	w.status = statusCode
 }
 
 func (w *Response) Write(data []byte) (int, error) {
@@ -61,4 +62,12 @@ func NewResponseWriter(conn net.Conn) *Response {
 		status:      0,
 		headersSent: false,
 	}
+}
+
+func (w *Response) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.conn == nil {
+		return nil, nil, fmt.Errorf("connection is not available")
+	}
+	rw := bufio.NewReadWriter(bufio.NewReader(w.conn), bufio.NewWriter(w.conn))
+	return w.conn, rw, nil
 }
